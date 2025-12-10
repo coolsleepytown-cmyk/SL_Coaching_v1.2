@@ -1,0 +1,5 @@
+{
+  "name": "SLII Leadership Coach",
+  "description": "An interactive coaching application based on Ken Blanchard's Situational Leadership II model using Gemini to simulate employee scenarios and provide feedback.",
+  "requestFramePermissions": []
+}
