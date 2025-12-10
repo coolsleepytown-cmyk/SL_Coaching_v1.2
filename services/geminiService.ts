@@ -3,17 +3,12 @@ import { AnalysisResult, DevelopmentLevel, Scenario, Message, SessionRecord, Tea
 
 // Helper to safely get the AI client
 const getAIClient = () => {
-  // The API key must be obtained exclusively from the environment variable process.env.API_KEY.
-  // Assume this variable is pre-configured, valid, and accessible.
   return new GoogleGenAI({ apiKey: process.env.API_KEY });
 };
 
 const modelFlash = 'gemini-2.5-flash';
-// Pro model reserved for complex creative tasks if needed, but Flash is used for analysis for speed
-const modelPro = 'gemini-3-pro-preview';
 
 // Retry wrapper for API calls to handle 503/429 errors
-// INCREASED RETRIES and DELAY for stability
 const callWithRetry = async <T>(
   operation: () => Promise<T>, 
   retries = 5, 
@@ -22,15 +17,21 @@ const callWithRetry = async <T>(
   try {
     return await operation();
   } catch (error: any) {
-    const msg = error.message || JSON.stringify(error);
-    const isTransient = msg.includes('503') || msg.includes('429') || msg.includes('Overloaded') || msg.includes('UNAVAILABLE');
+    const msg = (error.message || JSON.stringify(error)).toLowerCase();
+    const isTransient = 
+      msg.includes('503') || 
+      msg.includes('429') || 
+      msg.includes('overloaded') || 
+      msg.includes('unavailable') || 
+      msg.includes('resource exhausted') ||
+      msg.includes('quota') ||
+      msg.includes('internal error');
     
     if (retries > 0 && isTransient) {
-      // Exponential backoff with jitter to prevent thundering herd
       const actualDelay = delay * (1 + Math.random() * 0.5); 
-      console.warn(`API Busy (503/429). Retrying in ${Math.round(actualDelay)}ms... attempts left: ${retries}`);
+      console.warn(`API Busy (Status: ${msg}). Retrying in ${Math.round(actualDelay)}ms... attempts left: ${retries}`);
       await new Promise(resolve => setTimeout(resolve, actualDelay));
-      return callWithRetry(operation, retries - 1, delay * 2);
+      return callWithRetry(operation, retries - 1, Math.min(delay * 1.5, 10000));
     }
     throw error;
   }
@@ -54,7 +55,6 @@ Styles:
 // Helper to strip markdown code blocks if present
 const cleanJsonString = (text: string): string => {
   if (!text) return "[]";
-  // Remove ```json and ``` or just ```
   let clean = text.replace(/```json/g, "").replace(/```/g, "");
   return clean.trim();
 };
@@ -74,8 +74,6 @@ const FALLBACK_DATA = {
   ]
 };
 
-// Generate randomized fallback scenarios so the "Refresh" button always produces new content
-// even if the API is failing or missing.
 const generateDynamicFallbackScenarios = (timestamp: number): Scenario[] => {
   const getRandom = (arr: string[]) => arr[Math.floor(Math.random() * arr.length)];
   
@@ -119,7 +117,6 @@ const generateDynamicFallbackScenarios = (timestamp: number): Scenario[] => {
   ];
 };
 
-// Robust Safety Settings using Enums
 const commonSafetySettings = [
   { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
   { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
@@ -129,7 +126,6 @@ const commonSafetySettings = [
 
 export const generateScenarios = async (industry?: string, role?: string): Promise<Scenario[]> => {
   const domains = ['IT Startup', 'Manufacturing', 'Hospital', 'Sales Team', 'Design Agency', 'Bank', 'Retail'];
-  // Use provided industry or pick random if not provided
   const targetIndustry = industry?.trim() ? industry : domains[Math.floor(Math.random() * domains.length)];
   const targetRoleInstruction = role?.trim() ? `Job Role focus: ${role}.` : 'Various job roles.';
   
@@ -176,7 +172,7 @@ export const generateScenarios = async (industry?: string, role?: string): Promi
         responseSchema: schema,
         temperature: 0.9,
       }
-    }));
+    }), 3, 2000);
 
     const text = cleanJsonString(response.text || "");
     if (!text) throw new Error("No response from Gemini");
@@ -187,11 +183,9 @@ export const generateScenarios = async (industry?: string, role?: string): Promi
       scenarios = [];
     }
 
-    // Fallback Logic: Ensure exactly 4 items
     if (scenarios.length < 4) {
       console.warn(`API returned ${scenarios.length} scenarios. Filling from fallback.`);
       const fallback = generateDynamicFallbackScenarios(timestamp);
-      // Merge distinct levels if possible
       const existingLevels = new Set(scenarios.map(s => s.developmentLevel));
       
       for (const fbItem of fallback) {
@@ -201,7 +195,6 @@ export const generateScenarios = async (industry?: string, role?: string): Promi
           existingLevels.add(fbItem.developmentLevel);
         }
       }
-      // If still < 4, just fill sequentially
       let i = 0;
       while (scenarios.length < 4) {
          scenarios.push({ ...fallback[i], id: `fill-${timestamp}-${i}` });
@@ -212,7 +205,6 @@ export const generateScenarios = async (industry?: string, role?: string): Promi
     return scenarios;
   } catch (error) {
     console.error("Error generating scenarios:", error);
-    // Return dynamic fallback scenarios so the user sees new content even if API fails
     return generateDynamicFallbackScenarios(timestamp);
   }
 };
@@ -223,21 +215,16 @@ export const getEmployeeResponse = async (
 ): Promise<string> => {
   const systemInstruction = `
     You are roleplaying as ${scenario.employeeName}, a ${scenario.employeeRole} at development level ${scenario.developmentLevel}.
-    
     Context: ${scenario.description}
-    
     Your Traits based on ${scenario.developmentLevel}:
     - D1: Enthusiastic but inexperienced. Needs direction.
     - D2: Frustrated or overwhelmed. Needs coaching and encouragement.
     - D3: Capable but cautious/insecure. Needs support and listening.
     - D4: Confident and expert. Needs autonomy.
-
     Respond to the manager (User) naturally in Korean. Keep responses concise (under 3 sentences).
-    Stay in character. If the manager gives bad leadership (e.g., micromanaging a D4), show annoyance or disengagement.
-    If the manager uses the right style, react positively.
+    Stay in character.
   `;
 
-  // CLEANUP: Filter empty messages AND previous error messages to prevent pollution
   const validHistory = history.filter(msg => 
     msg.text && 
     msg.text.trim() !== '' && 
@@ -245,13 +232,11 @@ export const getEmployeeResponse = async (
     !msg.text.includes('{"error"')
   );
 
-  // Convert history to Gemini format
   let contents = validHistory.map(msg => ({
     role: msg.role === 'user' ? 'user' : 'model',
     parts: [{ text: msg.text }]
   }));
 
-  // Ensure the conversation starts with a User turn for the API
   if (contents.length === 0 || contents[0].role === 'model') {
     contents = [
       { role: 'user', parts: [{ text: "상황극을 시작합니다. (Start Roleplay)" }] },
@@ -269,44 +254,38 @@ export const getEmployeeResponse = async (
         temperature: 0.7,
         safetySettings: commonSafetySettings,
       }
-    }));
+    }), 8, 3000);
+
     return response.text || "...";
   } catch (error: any) {
     console.error("Error in chat loop:", error);
-    
-    // Parse error for better UI
-    const errorMsg = error.message || JSON.stringify(error);
-    
-    if (errorMsg.includes("429") || errorMsg.includes("503") || errorMsg.includes("Overloaded")) {
-      return "시스템 오류: 사용량이 많아 잠시 지연되고 있습니다. 5초 뒤에 다시 시도해주세요.";
+    const msg = error.message || String(error);
+    if (msg.includes("429") || msg.includes("503") || msg.includes("quota")) {
+       return "시스템 오류: 사용량이 많아 잠시 지연되고 있습니다. 5초 뒤에 다시 시도해주세요.";
     }
-    
-    // Return a clean error message, NOT the raw JSON
-    return "시스템 오류가 발생했습니다. 잠시 후 다시 말씀해 주세요.";
+    return "시스템 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.";
   }
 };
 
 export const analyzeFullSession = async (
   scenario: Scenario,
-  messages: Message[]
+  history: Message[]
 ): Promise<AnalysisResult> => {
   const systemInstruction = `
-    You are a master Situational Leadership coach.
-    Analyze the ENTIRE transcript between a Manager (User) and an Employee (${scenario.developmentLevel}).
+    You are an expert SLII Leadership Assessor. 
+    Analyze the conversation between a Manager (User) and an Employee (AI).
     
-    ${getSLIIDefinitions()}
-    
-    The Subordinate is level: ${scenario.developmentLevel}.
-    
-    Task:
-    1. Identify the Manager's leadership style distribution (S1, S2, S3, S4). 
-       Estimate the percentage of time each style was used (Must sum to 100%).
-    2. Identify the top 2 styles based on the distribution.
-    3. Score the effectiveness (0-100).
-    4. Provide specific feedback for key turns in the conversation.
-    5. Create a concrete Action Plan (Mission) for the manager to improve.
-    
-    Output in Korean.
+    Employee Context:
+    - Name: ${scenario.employeeName}
+    - Level: ${scenario.developmentLevel}
+    - Needs: ${getSLIIDefinitions()}
+
+    Your Task:
+    1. Identify the user's PRIMARY and SECONDARY leadership styles used (S1, S2, S3, S4).
+    2. Estimate the percentage distribution of each style used (must sum to 100%).
+    3. Determine if the style matched the employee's development level.
+    4. Provide a score (0-100).
+    5. Give specific actionable feedback and an action plan.
   `;
 
   const schema: Schema = {
@@ -314,23 +293,22 @@ export const analyzeFullSession = async (
     properties: {
       leaderStyleIdentified: { 
         type: Type.ARRAY, 
-        items: { type: Type.STRING, enum: ["S1", "S2", "S3", "S4"] },
-        description: "The two most dominant leadership styles used by the manager."
+        items: { type: Type.STRING },
+        description: "The top 2 leadership styles used (e.g. ['S1', 'S2'])" 
       },
       styleScore: {
         type: Type.OBJECT,
-        description: "Percentage distribution of styles used. Sum must be 100.",
         properties: {
-          S1: { type: Type.INTEGER },
-          S2: { type: Type.INTEGER },
-          S3: { type: Type.INTEGER },
-          S4: { type: Type.INTEGER }
+          S1: { type: Type.NUMBER },
+          S2: { type: Type.NUMBER },
+          S3: { type: Type.NUMBER },
+          S4: { type: Type.NUMBER }
         },
         required: ["S1", "S2", "S3", "S4"]
       },
       isMatch: { type: Type.BOOLEAN },
-      score: { type: Type.INTEGER },
-      summaryFeedback: { type: Type.STRING, description: "Overall summary of the session." },
+      score: { type: Type.NUMBER },
+      summaryFeedback: { type: Type.STRING },
       turnByTurnAnalysis: {
         type: Type.ARRAY,
         items: {
@@ -347,9 +325,9 @@ export const analyzeFullSession = async (
         items: {
           type: Type.OBJECT,
           properties: {
-            task: { type: Type.STRING, description: "Specific practice task" },
+            task: { type: Type.STRING },
             deadline: { type: Type.STRING },
-            metric: { type: Type.STRING, description: "How to verify completion" }
+            metric: { type: Type.STRING }
           }
         }
       }
@@ -357,126 +335,147 @@ export const analyzeFullSession = async (
     required: ["leaderStyleIdentified", "styleScore", "isMatch", "score", "summaryFeedback", "turnByTurnAnalysis", "actionPlan"]
   };
 
-  // CLEANUP: Filter out error messages from transcript analysis
-  const cleanMessages = messages.filter(m => !m.text.includes("시스템 오류"));
-  const transcript = cleanMessages.map(m => `${m.role === 'user' ? 'Manager' : 'Employee'}: ${m.text}`).join('\n');
+  const conversationText = history
+    .map(m => `${m.role === 'user' ? 'Manager' : 'Employee'}: ${m.text}`)
+    .join("\n");
 
   try {
     const ai = getAIClient();
-    // CHANGED: Use modelFlash instead of modelPro for significantly faster analysis
     const response = await callWithRetry<GenerateContentResponse>(() => ai.models.generateContent({
       model: modelFlash,
-      contents: `
-        Scenario: ${scenario.description}
-        Employee: ${scenario.employeeName} (${scenario.developmentLevel})
-        
-        TRANSCRIPT:
-        ${transcript}
-        
-        Analyze the manager's performance.
-      `,
+      contents: `Analyze this roleplay session:\n${conversationText}`,
       config: {
         systemInstruction,
         responseMimeType: "application/json",
         responseSchema: schema,
-        temperature: 0.1, // Lower temperature for faster, deterministic output
-        safetySettings: commonSafetySettings,
+        temperature: 0.1, // Low temp for consistent analysis
       }
-    }));
+    }), 5, 2000);
 
     const text = cleanJsonString(response.text || "");
-    if (!text) throw new Error("No analysis from Gemini (Empty Response)");
     return JSON.parse(text) as AnalysisResult;
   } catch (error) {
-    console.error("Error analyzing session:", error);
-    throw error;
+    console.error("Analysis Error:", error);
+    // Return a dummy result to prevent crash
+    return {
+      leaderStyleIdentified: ["Unknown"],
+      styleScore: { S1: 25, S2: 25, S3: 25, S4: 25 },
+      isMatch: false,
+      score: 0,
+      summaryFeedback: "분석 중 시스템 오류가 발생했습니다. 다시 시도해 주세요.",
+      turnByTurnAnalysis: [],
+      actionPlan: []
+    };
   }
 };
 
 export const generateTeamAnalysis = async (records: SessionRecord[]): Promise<TeamAnalysisResult> => {
-  if (records.length === 0) throw new Error("No records to analyze");
+  if (records.length === 0) {
+    throw new Error("No records to analyze");
+  }
+
+  // Pre-calculate stats to help the AI
+  const totalScore = records.reduce((acc, r) => acc + r.score, 0);
+  const avgScore = Math.round(totalScore / records.length);
+  
+  // Aggregate style scores
+  const totalStyles = { S1: 0, S2: 0, S3: 0, S4: 0 };
+  let count = 0;
+  
+  records.forEach(r => {
+    if (r.result.styleScore) {
+      totalStyles.S1 += r.result.styleScore.S1 || 0;
+      totalStyles.S2 += r.result.styleScore.S2 || 0;
+      totalStyles.S3 += r.result.styleScore.S3 || 0;
+      totalStyles.S4 += r.result.styleScore.S4 || 0;
+      count++;
+    } else {
+      // Legacy support: if styleScore missing, infer from leaderStyleIdentified
+      const styles = Array.isArray(r.result.leaderStyleIdentified) 
+        ? r.result.leaderStyleIdentified 
+        : [r.result.leaderStyleIdentified];
+      styles.forEach(s => {
+        if (s === 'S1') totalStyles.S1 += 100;
+        if (s === 'S2') totalStyles.S2 += 100;
+        if (s === 'S3') totalStyles.S3 += 100;
+        if (s === 'S4') totalStyles.S4 += 100;
+      });
+      count++;
+    }
+  });
+
+  // Calculate average percentage
+  const styleDistribution = {
+    S1: count ? Math.round(totalStyles.S1 / count) : 0,
+    S2: count ? Math.round(totalStyles.S2 / count) : 0,
+    S3: count ? Math.round(totalStyles.S3 / count) : 0,
+    S4: count ? Math.round(totalStyles.S4 / count) : 0
+  };
 
   const systemInstruction = `
-    You are an HR Executive Coach. Analyze the aggregated performance data of a leadership team practicing Situational Leadership II.
+    You are an HR Analytics Expert. Analyze the aggregate coaching data of a team.
     
-    Data Provided: A list of session summaries including 'styleScore' (percentage of styles used in each session).
+    Data Summary:
+    - Participants: ${records.length}
+    - Average Score: ${avgScore}
+    - Style Distribution (Average Usage %): ${JSON.stringify(styleDistribution)}
     
     Task:
-    1. Summarize the team's overall leadership capability.
-    2. Calculate the **AVERAGE** usage percentage of each style (S1, S2, S3, S4) across the entire team based on the provided styleScores.
-    3. Provide executive recommendations.
+    1. Write an Executive Summary of the team's leadership capability.
+    2. Identify Key Strengths (3 bullet points).
+    3. Identify Common Weaknesses/Blind spots (3 bullet points).
+    4. Recommend Training Actions.
     
     Output in Korean.
   `;
 
-  // Safely map records, ensuring styleUsed is always an array for the LLM
-  const simplifiedData = records.map(r => {
-    // Legacy support: if styleScore missing, estimate from identified styles
-    let stylesObj = r.result.styleScore;
-    if (!stylesObj) {
-      const identified = Array.isArray(r.result.leaderStyleIdentified) 
-        ? r.result.leaderStyleIdentified 
-        : [r.result.leaderStyleIdentified as string];
-      
-      // Rough estimation for legacy data
-      stylesObj = { S1: 0, S2: 0, S3: 0, S4: 0 };
-      const weight = Math.floor(100 / identified.length);
-      identified.forEach(s => {
-        if (s in stylesObj!) (stylesObj as any)[s] = weight;
-      });
-    }
-
-    return {
-      user: r.userName,
-      scenario: r.scenarioTitle,
-      score: r.result.score,
-      styleDistribution: stylesObj, // Pass the percentage object
-      feedback: r.result.summaryFeedback.substring(0, 100) + "..."
-    };
-  });
-
   const schema: Schema = {
     type: Type.OBJECT,
     properties: {
-      overallScore: { type: Type.INTEGER, description: "Average score of the team" },
-      participantCount: { type: Type.INTEGER },
-      styleDistribution: { 
-        type: Type.OBJECT, 
-        description: "The AVERAGE percentage of each style used across the team. (e.g., S1: 15, S2: 40...)",
+      overallScore: { type: Type.NUMBER },
+      participantCount: { type: Type.NUMBER },
+      styleDistribution: {
+        type: Type.OBJECT,
         properties: {
-          S1: { type: Type.INTEGER },
-          S2: { type: Type.INTEGER },
-          S3: { type: Type.INTEGER },
-          S4: { type: Type.INTEGER }
+          S1: { type: Type.NUMBER },
+          S2: { type: Type.NUMBER },
+          S3: { type: Type.NUMBER },
+          S4: { type: Type.NUMBER }
         }
       },
       keyStrengths: { type: Type.ARRAY, items: { type: Type.STRING } },
       commonWeaknesses: { type: Type.ARRAY, items: { type: Type.STRING } },
       trainingRecommendations: { type: Type.ARRAY, items: { type: Type.STRING } },
-      executiveSummary: { type: Type.STRING, description: "Comprehensive paragraph summarising the team's state." }
+      executiveSummary: { type: Type.STRING }
     },
-    required: ["overallScore", "participantCount", "styleDistribution", "keyStrengths", "commonWeaknesses", "trainingRecommendations", "executiveSummary"]
+    required: ["executiveSummary", "keyStrengths", "commonWeaknesses", "trainingRecommendations"]
   };
 
   try {
     const ai = getAIClient();
-    // CHANGED: Use modelFlash instead of modelPro for faster dashboard reporting
     const response = await callWithRetry<GenerateContentResponse>(() => ai.models.generateContent({
       model: modelFlash,
-      contents: `Analyze this team data:\n${JSON.stringify(simplifiedData, null, 2)}`,
+      contents: "Generate Team Analysis Report based on the provided summary data.",
       config: {
         systemInstruction,
         responseMimeType: "application/json",
         responseSchema: schema,
-        temperature: 0.1 // Lower temperature for speed
+        temperature: 0.2,
       }
-    }));
+    }), 3, 3000);
 
     const text = cleanJsonString(response.text || "");
-    if (!text) throw new Error("No response from Gemini");
-    return JSON.parse(text) as TeamAnalysisResult;
+    const aiResult = JSON.parse(text);
+
+    // Merge AI insights with hard calculations
+    return {
+      ...aiResult,
+      overallScore: avgScore,
+      participantCount: records.length,
+      styleDistribution: styleDistribution
+    };
   } catch (error) {
-    console.error("Error generating team report:", error);
+    console.error("Team Analysis Error:", error);
     throw error;
   }
 };

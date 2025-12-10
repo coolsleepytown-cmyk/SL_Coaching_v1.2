@@ -127,13 +127,21 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   };
 
   const handleGenerateReport = async () => {
-    if (activeRecords.length === 0) {
+    // Logic: Use selected records if available, otherwise use all active records
+    let recordsToAnalyze = activeRecords;
+    
+    if (selectedIds.size > 0) {
+      recordsToAnalyze = activeRecords.filter(r => selectedIds.has(r.id));
+    }
+
+    if (recordsToAnalyze.length === 0) {
       alert("분석할 데이터가 없습니다.");
       return;
     }
+
     setIsGenerating(true);
     try {
-      const result = await generateTeamAnalysis(activeRecords);
+      const result = await generateTeamAnalysis(recordsToAnalyze);
       setTeamReport(result);
     } catch (error) {
       alert("리포트 생성 중 오류가 발생했습니다.");
@@ -166,8 +174,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 [SLII 팀 리더십 분석 결과 리포트]
 
 생성일: ${new Date().toLocaleDateString()}
-참여 세션: ${activeRecords.length}건
-팀 평균 점수: ${avgScore}점
+참여 세션: ${teamReport.participantCount}건
+팀 평균 점수: ${teamReport.overallScore}점
 
 --------------------------------------------------
 [Executive Summary]
@@ -231,7 +239,9 @@ ${teamReport.commonWeaknesses.map(w => `- ${w}`).join('\n')}
              ) : (
                <>
                  <svg className="w-8 h-8 text-indigo-600 mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
-                 <span className="text-sm font-bold text-indigo-700">팀 리포트 생성</span>
+                 <span className="text-sm font-bold text-indigo-700">
+                   {selectedIds.size > 0 ? `선택된 ${selectedIds.size}명 리포트 생성` : '전체 팀 리포트 생성'}
+                 </span>
                </>
              )}
           </div>
@@ -315,6 +325,7 @@ ${teamReport.commonWeaknesses.map(w => `- ${w}`).join('\n')}
                   <div className="text-center border-b border-slate-100 pb-6">
                      <h1 className="text-3xl font-bold text-slate-800 mb-2">Team Leadership Analysis</h1>
                      <p className="text-slate-500">생성일: {new Date().toLocaleDateString()}</p>
+                     <p className="text-sm text-indigo-600 mt-1">{teamReport.participantCount}명의 데이터 기반 분석</p>
                   </div>
 
                   {/* Summary Box */}
